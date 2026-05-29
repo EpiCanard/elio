@@ -1,4 +1,5 @@
 custom-circuitpython/
 circuitpython/
 backup/
+**/__pycache__/
 
