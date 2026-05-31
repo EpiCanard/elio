@@ -14,12 +14,13 @@ const int STOP_PIN = 8;
 
 const float RADIANS_TO_DEGREES = 57.2957795f;
 const uint16_t CALIBRATION_SAMPLES = 200;
+const bool IMU_DEBUG_ONLY = false;
 
 // A finger does not move through large angles. Lower FULL_* values make the
 // controller reach max command with a smaller tilt.
 const float SPEED_DEADZONE_DEG = 3.0f;
 const float SPEED_FULL_SCALE_DEG = 24.0f;
-const float SPEED_DIRECTION = 1.0f;
+const float SPEED_DIRECTION = -1.0f;
 const float STEERING_DEADZONE_DEG = 8.0f;
 const float STEERING_FULL_SCALE_DEG = 45.0f;
 const float MAX_STEERING_COMMAND = 90.0f;
@@ -28,16 +29,29 @@ const float SPEED_SMOOTHING = 0.22f;
 const float STEERING_SMOOTHING = 0.25f;
 const uint16_t SEND_INTERVAL_MS = 50;
 const uint16_t DEBUG_INTERVAL_MS = 200;
+const uint16_t BUTTON_DEBOUNCE_MS = 200;
 
 float speed_tilt_bias = 0.0f;
 float roll_bias = 0.0f;
+float raw_x_bias = 0.0f;
+float raw_y_bias = 0.0f;
+float raw_z_bias = 0.0f;
 float filtered_speed = 0.0f;
 float filtered_angle = 0.0f;
 float last_sent_speed = 999.0f;
 float last_sent_angle = 999.0f;
 uint32_t last_send_ms = 0;
 uint32_t last_debug_ms = 0;
-bool stop_latched = false;
+uint32_t last_stop_button_ms = 0;
+bool stop_enabled = false;
+bool stop_button_was_pressed = false;
+bool imu_debug_output_enabled = true;
+
+struct AccelReading {
+  float raw_x;
+  float raw_y;
+  float raw_z;
+};
 
 static float clamp_float(float value, float minimum, float maximum) {
   if (value < minimum) {
@@ -82,43 +96,59 @@ static float angle_delta_degrees(float angle, float reference) {
   return delta;
 }
 
-static float read_accel_speed_tilt_degrees() {
-  float accel_x = myIMU.readFloatAccelX();
-  float accel_y = myIMU.readFloatAccelY();
-  float accel_z = myIMU.readFloatAccelZ();
-  (void) accel_x;
-  return atan2f(accel_y, accel_z) * RADIANS_TO_DEGREES;
+static AccelReading read_accel() {
+  AccelReading reading;
+
+  reading.raw_x = myIMU.readFloatAccelX();
+  reading.raw_y = myIMU.readFloatAccelY();
+  reading.raw_z = myIMU.readFloatAccelZ();
+  return reading;
 }
 
-static float read_accel_roll_degrees() {
-  float accel_x = myIMU.readFloatAccelX();
-  float accel_z = myIMU.readFloatAccelZ();
-  return atan2f(accel_x, accel_z) * RADIANS_TO_DEGREES;
+static float speed_tilt_degrees(const AccelReading& reading) {
+  return atan2f(reading.raw_z, reading.raw_y) * RADIANS_TO_DEGREES;
+}
+
+static float roll_degrees(const AccelReading& reading) {
+  return atan2f(reading.raw_x, reading.raw_y) * RADIANS_TO_DEGREES;
 }
 
 void calibrate_neutral() {
   float speed_tilt_sum = 0.0f;
   float roll_sum = 0.0f;
+  float raw_x_sum = 0.0f;
+  float raw_y_sum = 0.0f;
+  float raw_z_sum = 0.0f;
 
   digitalWrite(LED_BLUE, LOW);
 
   for (uint16_t sample = 0; sample < CALIBRATION_SAMPLES; ++sample) {
-    speed_tilt_sum += read_accel_speed_tilt_degrees();
-    roll_sum += read_accel_roll_degrees();
+    AccelReading reading = read_accel();
+    speed_tilt_sum += speed_tilt_degrees(reading);
+    roll_sum += roll_degrees(reading);
+    raw_x_sum += reading.raw_x;
+    raw_y_sum += reading.raw_y;
+    raw_z_sum += reading.raw_z;
     delay(5);
   }
 
   speed_tilt_bias = speed_tilt_sum / CALIBRATION_SAMPLES;
   roll_bias = roll_sum / CALIBRATION_SAMPLES;
+  raw_x_bias = raw_x_sum / CALIBRATION_SAMPLES;
+  raw_y_bias = raw_y_sum / CALIBRATION_SAMPLES;
+  raw_z_bias = raw_z_sum / CALIBRATION_SAMPLES;
   filtered_speed = 0.0f;
   filtered_angle = 0.0f;
 
   digitalWrite(LED_BLUE, HIGH);
 
   Serial.printf(
-    "Calibration complete: speed_tilt_bias=%.2f roll_bias=%.2f\n",
+    "Calibration complete: speed_tilt_bias=%.2f roll_bias=%.2f raw_bias=(%.2f,%.2f,%.2f)\n",
     speed_tilt_bias,
-    roll_bias
+    roll_bias,
+    raw_x_bias,
+    raw_y_bias,
+    raw_z_bias
   );
 }
 
@@ -203,7 +233,7 @@ void send_drive_command(float angle, float speed, bool force) {
   Serial.printf("sent: angle=%d speed=%d\n", command_angle, command_speed);
 }
 
-void print_motion_debug(float speed_tilt, float roll, float angle, float speed) {
+void print_motion_debug(const AccelReading& reading, float speed_tilt, float roll, float angle, float speed) {
   uint32_t now = millis();
 
   if (now - last_debug_ms < DEBUG_INTERVAL_MS) {
@@ -212,13 +242,39 @@ void print_motion_debug(float speed_tilt, float roll, float angle, float speed) 
 
   last_debug_ms = now;
   Serial.printf(
-    "motion: speed_tilt=%.1f roll=%.1f angle=%.1f speed=%.1f stop_pin=%d calibrate_pin=%d\n",
+    "motion: raw=(%.2f,%.2f,%.2f) speed_tilt=%.1f roll=%.1f angle=%.1f speed=%.1f stop_pin=%d calibrate_pin=%d\n",
+    reading.raw_x,
+    reading.raw_y,
+    reading.raw_z,
     speed_tilt,
     roll,
     angle,
     speed,
     digitalRead(STOP_PIN),
     digitalRead(CALIBRATE_PIN)
+  );
+}
+
+void print_imu_debug_only() {
+  uint32_t now = millis();
+
+  if (now - last_debug_ms < DEBUG_INTERVAL_MS) {
+    return;
+  }
+
+  last_debug_ms = now;
+
+  AccelReading reading = read_accel();
+  Serial.printf(
+    "imu: raw=(%.3f,%.3f,%.3f) delta=(%.3f,%.3f,%.3f) speed_tilt=%.1f roll=%.1f\n",
+    reading.raw_x,
+    reading.raw_y,
+    reading.raw_z,
+    reading.raw_x - raw_x_bias,
+    reading.raw_y - raw_y_bias,
+    reading.raw_z - raw_z_bias,
+    angle_delta_degrees(speed_tilt_degrees(reading), speed_tilt_bias),
+    roll_degrees(reading) - roll_bias
   );
 }
 
@@ -247,10 +303,52 @@ void setup() {
   }
 
   calibrate_neutral();
+
+  if (IMU_DEBUG_ONLY) {
+    Serial.println("IMU debug only: BLE drive disabled");
+    return;
+  }
+
   setup_bluetooth();
 }
 
 void loop() {
+  if (IMU_DEBUG_ONLY) {
+    if (digitalRead(CALIBRATE_PIN) == LOW) {
+      calibrate_neutral();
+      delay(250);
+      return;
+    }
+
+    bool stop_button_pressed = digitalRead(STOP_PIN) == LOW;
+    uint32_t now = millis();
+
+    if (
+      stop_button_pressed &&
+      !stop_button_was_pressed &&
+      now - last_stop_button_ms >= BUTTON_DEBOUNCE_MS
+    ) {
+      imu_debug_output_enabled = !imu_debug_output_enabled;
+      last_stop_button_ms = now;
+
+      if (imu_debug_output_enabled) {
+        Serial.println("debug_output: on");
+        last_debug_ms = 0;
+      } else {
+        Serial.println("debug_output: off");
+      }
+    }
+
+    stop_button_was_pressed = stop_button_pressed;
+
+    if (imu_debug_output_enabled) {
+      print_imu_debug_only();
+    }
+
+    delay(10);
+    return;
+  }
+
   if (!Bluefruit.connected()) {
     delay(20);
     return;
@@ -265,21 +363,33 @@ void loop() {
     return;
   }
 
-  if (digitalRead(STOP_PIN) == LOW) {
+  bool stop_button_pressed = digitalRead(STOP_PIN) == LOW;
+  uint32_t now = millis();
+
+  if (
+    stop_button_pressed &&
+    !stop_button_was_pressed &&
+    now - last_stop_button_ms >= BUTTON_DEBOUNCE_MS
+  ) {
+    stop_enabled = !stop_enabled;
+    last_stop_button_ms = now;
+    filtered_speed = 0.0f;
+    filtered_angle = 0.0f;
     send_drive_command(0.0f, 0.0f, true);
-    stop_latched = true;
-    delay(20);
+    Serial.printf("stop_toggle: %s\n", stop_enabled ? "on" : "off");
+  }
+
+  stop_button_was_pressed = stop_button_pressed;
+
+  if (stop_enabled) {
+    send_drive_command(0.0f, 0.0f, false);
+    delay(10);
     return;
   }
 
-  if (stop_latched) {
-    stop_latched = false;
-    filtered_speed = 0.0f;
-    filtered_angle = 0.0f;
-  }
-
-  float speed_tilt = angle_delta_degrees(read_accel_speed_tilt_degrees(), speed_tilt_bias) * SPEED_DIRECTION;
-  float roll = read_accel_roll_degrees() - roll_bias;
+  AccelReading reading = read_accel();
+  float speed_tilt = angle_delta_degrees(speed_tilt_degrees(reading), speed_tilt_bias) * SPEED_DIRECTION;
+  float roll = roll_degrees(reading) - roll_bias;
 
   float target_speed = apply_deadzone_scaled(speed_tilt, SPEED_DEADZONE_DEG, SPEED_FULL_SCALE_DEG, 100.0f);
   float target_angle = apply_deadzone_scaled(
@@ -292,7 +402,7 @@ void loop() {
   filtered_speed += (target_speed - filtered_speed) * SPEED_SMOOTHING;
   filtered_angle += (target_angle - filtered_angle) * STEERING_SMOOTHING;
 
-  print_motion_debug(speed_tilt, roll, filtered_angle, filtered_speed);
+  print_motion_debug(reading, speed_tilt, roll, filtered_angle, filtered_speed);
   send_drive_command(filtered_angle, filtered_speed, false);
   delay(10);
 }
