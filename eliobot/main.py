@@ -9,7 +9,7 @@ import digitalio
 from adafruit_ble import BLERadio
 from adafruit_ble.advertising.standard import ProvideServicesAdvertisement
 from adafruit_ble.services.nordic import UARTService
-from elio import Motors
+from elio import Motors, EyesMatrix
 
 BLE_NAME = "Eliobot"
 PWM_FREQUENCY = 1000
@@ -26,6 +26,13 @@ AIN2 = pwmio.PWMOut(board.IO38, frequency=PWM_FREQUENCY, duty_cycle=0)
 BIN1 = pwmio.PWMOut(board.IO35, frequency=PWM_FREQUENCY, duty_cycle=0)
 BIN2 = pwmio.PWMOut(board.IO37, frequency=PWM_FREQUENCY, duty_cycle=0)
 vBatt_pin = analogio.AnalogIn(board.BATTERY)
+
+eyes_matrix = EyesMatrix(board.IO2)
+
+
+eye_matrix_blue = [(0, 0, 0), (0, 0, 0), (255, 255, 255), (255, 255, 255), (255, 255, 255), (255, 255, 255), (0, 0, 0), (0, 0, 0), (0, 0, 0), (255, 255, 255), (255, 255, 255), (255, 255, 255), (255, 255, 255), (255, 255, 255), (255, 255, 255), (0, 0, 0), (255, 255, 255), (255, 255, 255), (255, 255, 255), (51, 204, 255), (51, 204, 255), (255, 255, 255), (255, 255, 255), (255, 255, 255), (255, 255, 255), (255, 255, 255), (51, 204, 255), (51, 204, 255), (51, 204, 255), (51, 204, 255), (255, 255, 255), (255, 255, 255), (255, 255, 255), (255, 255, 255), (51, 204, 255), (51, 204, 255), (51, 204, 255), (51, 204, 255), (255, 255, 255), (255, 255, 255), (255, 255, 255), (255, 255, 255), (255, 255, 255), (51, 204, 255), (51, 204, 255), (255, 255, 255), (255, 255, 255), (255, 255, 255), (0, 0, 0), (255, 255, 255), (255, 255, 255), (255, 255, 255), (255, 255, 255), (255, 255, 255), (255, 255, 255), (0, 0, 0), (0, 0, 0), (0, 0, 0), (255, 255, 255), (255, 255, 255), (255, 255, 255), (255, 255, 255), (0, 0, 0), (0, 0, 0)]
+eye_matrix_red = [(0, 0, 0), (0, 0, 0), (255, 255, 255), (255, 255, 255), (255, 255, 255), (255, 255, 255), (0, 0, 0), (0, 0, 0), (0, 0, 0), (255, 255, 255), (255, 255, 255), (255, 255, 255), (255, 255, 255), (255, 255, 255), (255, 255, 255), (0, 0, 0), (255, 255, 255), (255, 255, 255), (255, 255, 255), (255, 0, 0), (255, 0, 0), (255, 255, 255), (255, 255, 255), (255, 255, 255), (255, 255, 255), (255, 255, 255), (255, 0, 0), (255, 0, 0), (255, 0, 0), (255, 0, 0), (255, 255, 255), (255, 255, 255), (255, 255, 255), (255, 255, 255), (255, 0, 0), (255, 0, 0), (255, 0, 0), (255, 0, 0), (255, 255, 255), (255, 255, 255), (255, 255, 255), (255, 255, 255), (255, 255, 255), (255, 0, 0), (255, 0, 0), (255, 255, 255), (255, 255, 255), (255, 255, 255), (0, 0, 0), (255, 255, 255), (255, 255, 255), (255, 255, 255), (255, 255, 255), (255, 255, 255), (255, 255, 255), (0, 0, 0), (0, 0, 0), (0, 0, 0), (255, 255, 255), (255, 255, 255), (255, 255, 255), (255, 255, 255), (0, 0, 0), (0, 0, 0)]
+eye_color_is_blue = True
 
 motors = Motors(AIN1, AIN2, BIN1, BIN2, vBatt_pin)
 
@@ -52,6 +59,19 @@ def blink(color, delay, repeat=1):
         pixel.fill((0, 0, 0))
         pixel.show()
         time.sleep(delay)
+
+
+def set_eye_color(is_blue):
+    eye_matrix = eye_matrix_blue if is_blue else eye_matrix_red
+    eyes_matrix.set_matrix_colors(eye_matrix + eye_matrix)
+
+
+def toggle_eye_color():
+    global eye_color_is_blue
+
+    eye_color_is_blue = not eye_color_is_blue
+    set_eye_color(eye_color_is_blue)
+    return "blue" if eye_color_is_blue else "red"
 
 
 def parse_drive_command(command):
@@ -118,6 +138,7 @@ def send_line(message):
         print("Envoi BLE impossible:", exc)
 
 
+set_eye_color(eye_color_is_blue)
 motors.slow_stop()
 print("Demarrage BLE")
 
@@ -148,6 +169,15 @@ while True:
 
                 while "\n" in rx_buffer:
                     line, rx_buffer = rx_buffer.split("\n", 1)
+                    normalized_line = line.strip().lower()
+
+                    if normalized_line == "eyes":
+                        eye_color = toggle_eye_color()
+                        print("Yeux:", eye_color)
+                        if SEND_DRIVE_ACKS:
+                            send_line("OK eyes " + eye_color)
+                        continue
+
                     command = parse_drive_command(line)
 
                     if command is None:

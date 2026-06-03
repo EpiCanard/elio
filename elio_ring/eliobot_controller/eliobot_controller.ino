@@ -8,6 +8,7 @@ BLEClientUart robot_uart;
 LSM6DS3 myIMU(I2C_MODE, 0x6A);
 
 void send_drive_command(float angle, float speed, bool force);
+void send_eye_toggle_command();
 
 const int CALIBRATE_PIN = 10;
 const int STOP_PIN = 8;
@@ -30,6 +31,7 @@ const float STEERING_SMOOTHING = 0.25f;
 const uint16_t SEND_INTERVAL_MS = 50;
 const uint16_t DEBUG_INTERVAL_MS = 200;
 const uint16_t BUTTON_DEBOUNCE_MS = 200;
+const uint16_t STOP_LONG_PRESS_MS = 1000;
 
 float speed_tilt_bias = 0.0f;
 float roll_bias = 0.0f;
@@ -43,8 +45,13 @@ float last_sent_angle = 999.0f;
 uint32_t last_send_ms = 0;
 uint32_t last_debug_ms = 0;
 uint32_t last_stop_button_ms = 0;
+uint32_t last_eye_button_ms = 0;
 bool stop_enabled = false;
 bool stop_button_was_pressed = false;
+bool stop_button_press_active = false;
+bool stop_button_long_press_handled = false;
+uint32_t stop_button_press_start_ms = 0;
+bool eye_button_was_pressed = false;
 bool imu_debug_output_enabled = true;
 
 struct AccelReading {
@@ -233,6 +240,15 @@ void send_drive_command(float angle, float speed, bool force) {
   Serial.printf("sent: angle=%d speed=%d\n", command_angle, command_speed);
 }
 
+void send_eye_toggle_command() {
+  if (!Bluefruit.connected() || !robot_uart.discovered()) {
+    return;
+  }
+
+  robot_uart.print("eyes\n");
+  Serial.println("sent: eyes");
+}
+
 void print_motion_debug(const AccelReading& reading, float speed_tilt, float roll, float angle, float speed) {
   uint32_t now = millis();
 
@@ -242,7 +258,7 @@ void print_motion_debug(const AccelReading& reading, float speed_tilt, float rol
 
   last_debug_ms = now;
   Serial.printf(
-    "motion: raw=(%.2f,%.2f,%.2f) speed_tilt=%.1f roll=%.1f angle=%.1f speed=%.1f stop_pin=%d calibrate_pin=%d\n",
+    "motion: raw=(%.2f,%.2f,%.2f) speed_tilt=%.1f roll=%.1f angle=%.1f speed=%.1f stop_pin=%d eye_pin=%d\n",
     reading.raw_x,
     reading.raw_y,
     reading.raw_z,
@@ -356,30 +372,69 @@ void loop() {
 
   read_robot_responses();
 
-  if (digitalRead(CALIBRATE_PIN) == LOW) {
-    calibrate_neutral();
-    send_drive_command(0.0f, 0.0f, true);
-    delay(250);
-    return;
+  bool eye_button_pressed = digitalRead(CALIBRATE_PIN) == LOW;
+  uint32_t now = millis();
+
+  if (
+    eye_button_pressed &&
+    !eye_button_was_pressed &&
+    now - last_eye_button_ms >= BUTTON_DEBOUNCE_MS
+  ) {
+    send_eye_toggle_command();
+    last_eye_button_ms = now;
   }
 
+  eye_button_was_pressed = eye_button_pressed;
+
   bool stop_button_pressed = digitalRead(STOP_PIN) == LOW;
-  uint32_t now = millis();
 
   if (
     stop_button_pressed &&
     !stop_button_was_pressed &&
     now - last_stop_button_ms >= BUTTON_DEBOUNCE_MS
   ) {
-    stop_enabled = !stop_enabled;
+    stop_button_press_active = true;
+    stop_button_long_press_handled = false;
+    stop_button_press_start_ms = now;
     last_stop_button_ms = now;
+  }
+
+  if (
+    stop_button_pressed &&
+    stop_button_press_active &&
+    !stop_button_long_press_handled &&
+    now - stop_button_press_start_ms >= STOP_LONG_PRESS_MS
+  ) {
+    stop_button_long_press_handled = true;
+    stop_enabled = false;
     filtered_speed = 0.0f;
     filtered_angle = 0.0f;
     send_drive_command(0.0f, 0.0f, true);
-    Serial.printf("stop_toggle: %s\n", stop_enabled ? "on" : "off");
+    calibrate_neutral();
+    send_drive_command(0.0f, 0.0f, true);
+    Serial.println("controller_reset: long_stop_press");
+  }
+
+  if (!stop_button_pressed && stop_button_was_pressed && stop_button_press_active) {
+    if (!stop_button_long_press_handled) {
+      stop_enabled = !stop_enabled;
+      filtered_speed = 0.0f;
+      filtered_angle = 0.0f;
+      send_drive_command(0.0f, 0.0f, true);
+      Serial.printf("stop_toggle: %s\n", stop_enabled ? "on" : "off");
+    }
+
+    stop_button_press_active = false;
+    stop_button_long_press_handled = false;
+    last_stop_button_ms = now;
   }
 
   stop_button_was_pressed = stop_button_pressed;
+
+  if (stop_button_long_press_handled) {
+    delay(10);
+    return;
+  }
 
   if (stop_enabled) {
     send_drive_command(0.0f, 0.0f, false);

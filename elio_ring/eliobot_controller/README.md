@@ -12,11 +12,12 @@ puis les envoie au robot Eliobot avec le service BLE Nordic UART.
   Cette position est calibree comme zero.
 - Incliner le doigt vers l'avant/arriere pour commander la vitesse.
 - Incliner lateralement le doigt pour commander l'angle.
-- Bouton sur la broche `10`: recalibre la position neutre.
-- Bouton sur la broche `8`: active/desactive le mode stop. En mode stop, la
-  bague continue d'envoyer `0 0` jusqu'au prochain appui.
+- Bouton sur la broche `10`: alterne les yeux du robot entre bleu et rouge.
+- Bouton sur la broche `8`: un appui court active/desactive le mode stop. Un
+  appui long recalibre la position neutre. En mode stop, la bague continue
+  d'envoyer `0 0` jusqu'au prochain appui court.
 
-Le robot recoit des lignes texte:
+Le robot recoit des lignes texte pour la conduite:
 
 ```text
 angle vitesse
@@ -28,6 +29,12 @@ Exemples:
 0 0
 -30 45
 20 -35
+```
+
+La bague peut aussi envoyer cette commande pour alterner les yeux:
+
+```text
+eyes
 ```
 
 ## Commandes utiles
@@ -185,15 +192,18 @@ robot_uart.printf("%d %d\n", command_angle, command_speed);
 
 Le robot attend exactement ce format dans `eliobot/main.py`.
 
-### 6. Stop toggle
+### 6. Boutons
 
-Le bouton `STOP_PIN` est lu avec une detection de front et un debounce:
+Les boutons sont lus avec une detection de front et un debounce:
 
 ```cpp
 const uint16_t BUTTON_DEBOUNCE_MS = 200;
+const uint16_t STOP_LONG_PRESS_MS = 1000;
 ```
 
-Quand le bouton est presse:
+Quand `CALIBRATE_PIN` est presse, la bague envoie `eyes` au robot.
+
+Quand `STOP_PIN` est presse brievement:
 
 - `stop_enabled` bascule entre `true` et `false`;
 - les valeurs filtrees sont remises a zero;
@@ -201,6 +211,10 @@ Quand le bouton est presse:
 
 Tant que `stop_enabled` vaut `true`, la boucle continue d'envoyer `0 0` et ne
 calcule plus les gestes.
+
+Quand `STOP_PIN` reste presse au moins `STOP_LONG_PRESS_MS`, le mode stop est
+desactive, les commandes sont remises a zero, puis `calibrate_neutral()`
+recalibre la position neutre.
 
 ## Mode debug IMU
 
